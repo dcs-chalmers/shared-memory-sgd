@@ -9,6 +9,7 @@
     <br />
     <br />
     <a href="https://github.com/dcs-chalmers/shared-memory-sgd/issues">Report Bug</a>
+    ·
     <a href="https://github.com/dcs-chalmers/shared-memory-sgd/issues">Request Feature</a>
   </p>
 </p>
