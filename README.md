@@ -50,15 +50,21 @@
 
 Framework for implementing parallel shared-memory Artificial Neural Network (ANN) training in C++ with SGD, supporting various synchronization mechanisms degrees of consistency. The code builds upon the <a href="https://github.com/yixuan/MiniDNN">MiniDNN</a> implementation, and relies on Eigen and OpenMP. In particular, the project includes the implementation of **LEASHED** which guarantees consistency and lock-freedom.
 
-For technical details of **LEASHED** please see the original paper:
+For technical details of **LEASHED-SGD** and **ASAP.SGD** please see the original papers:
 
-> Bäckström, K., Walulya, I., Papatriantafilou, M., & Tsigas, P. (2021, February). *Consistent Lock-free Parallel Stochastic Gradient Descent for Fast and Stable Convergence*. In Proceedings of the 35th IEEE International Parallel & Distributed Processing Symposium *(to appear)*. <a href="https://arxiv.org/abs/2102.09032">Full version</a>.
+> Bäckström, K., Walulya, I., Papatriantafilou, M., & Tsigas, P. (2021, February). *Consistent Lock-free Parallel Stochastic Gradient Descent for Fast and Stable Convergence*. In Proceedings of the 35th IEEE International Parallel & Distributed Processing Symposium. <a href="https://arxiv.org/abs/2102.09032">Full version</a>.
 
-The following shared-memory parallel SGD methods are implemented:
+> Bäckström, K., Papatriantafilou, M., & Tsigas, P. (2022, July). *ASAP-SGD: Instance-based Adaptiveness to Staleness in Asynchronous SGD*. In Proceedings of the 39th International Conference on Machine Learning *(to appear)*.
+
+The following shared-memory parallel SGD algorithms are implemented:
 * Lock-based consistent asynchronous SGD
 * LEASHED - Lock-free implementation of consistent asynchronous SGD
 * Hogwild! - Lock-free asynchronous SGD without consistency
 * Synchronous parallel SGD
+
+The following asynchrony-aware options are implemented:
+* The TAIL-TAU Staleness-adaptive step size
+* The FLeet staleness-adaptive step size <a href="https://dl.acm.org/doi/10.1145/3423211.3425685">[Damaskinos, G, et al. Middleware '20]</a>.
 
 
 
@@ -95,7 +101,7 @@ Flag | Meaning | Values
 --- | --- | ---
 `a` | *algorithm* | ['ASYNC', 'HOG', 'LSH', 'SYNC']
 `n` | *n.o. threads* | Integer
-`A` | *architecture* | ['MLP', 'CNN']
+`A` | *architecture* | ['MLP', 'CNN', 'LENET']
 `L` | *n.o. hidden layers* | Integer (applies for MLP only)
 `U` | *n.o. hidden neurons per layer* | Integer (applies for MLP only)
 `B` | *persistence bound* | Integer (applies for LEASHED only)
@@ -103,6 +109,8 @@ Flag | Meaning | Values
 `r` | *n.o. rounds per epochs* | Integer
 `b` | *mini-batch size* | Integer
 `l` | *Step size* | Float
+`D` | *Dataset* | String
+`t` | *Staleness-adaptive step size strategy* | String
 
 to see all options:
  ```sh
@@ -137,12 +145,13 @@ Convolutional neural network (CNN) training with 8 threads using LEASHED-SGD:
  ./cmake-build-debug/mininn -a LSH -n 8 -A CNN -e 5 -r 469 -b 512 -l 0.005
  ```
 
-
-
-<!-- ROADMAP -->
-## Roadmap
-
-See the [open issues](https://github.com/dcs-chalmers/shared-memory-sgd/issues) for a list of proposed features (and known issues).
+Async-SGD LeNet training on CIFAR-10 with 16 threads, with and without TAIL-Tau:
+ ```sh
+ ./cmake-build-debug/mininn -a ASYNC -n 16 -A LENET -D 'CIFAR10' -e 100 -b 16 -l 0.005 -t TAIL
+ ```
+ ```sh
+ ./cmake-build-debug/mininn -a ASYNC -n 16 -A LENET -D 'CIFAR10' -e 100 -b 16 -l 0.005 -t NONE
+ ```
 
 
 

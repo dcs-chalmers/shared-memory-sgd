@@ -50,7 +50,7 @@ namespace MiniDNN {
         }
 
         Scalar get_w_delta(int layer_n, int i, Scalar m_dw_i) {
-            Scalar delta_i = (- m_lrate * m_dw_i) + mu * prev_delta_w[layer_n](i);
+            Scalar delta_i = (- step_scale_factor * m_lrate * m_dw_i) + mu * prev_delta_w[layer_n](i);
             if (layer_n == 0 && i == 0) {
                 //std::cout << "prev update: " << prev_delta_w[layer_n](i) << std::endl;
                 //std::cout << "this update: " << delta_i << std::endl;
@@ -60,7 +60,7 @@ namespace MiniDNN {
         }
 
         Scalar get_b_delta(int layer_n, int i, Scalar m_db_i) {
-            Scalar delta_i = (- m_lrate * m_db_i) + mu * prev_delta_b[layer_n](i);
+            Scalar delta_i = (- step_scale_factor * m_lrate * m_db_i) + mu * prev_delta_b[layer_n](i);
             prev_delta_b[layer_n](i) = delta_i;
             return delta_i;
         }

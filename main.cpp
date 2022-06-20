@@ -11,6 +11,8 @@
 
 #include <NetworkExecutor.h>
 
+#include "cifar10_reader.hpp"
+
 using namespace MiniDNN;
 
 int rand_seed = 1337;
@@ -22,26 +24,32 @@ int num_hidden_units = 128;
 int rounds_per_epoch = -1;
 int cas_backoff = 200;
 bool check_concurrent_updates = 0;
+
 enum class ALGORITHM {
-    SEQ, SYNC, ASYNC, HOG, LSH
+    ASYNC, HOG, LSH, SEQ, SYNC
 };
 std::vector<std::string> AlgoTypes = {
-        "SEQ",
-        "SYNC",
         "ASYNC",
         "HOG",
-        "LSH"
+        "LSH",
+        "SEQ",
+        "SYNC"
 };
 ALGORITHM run_algo = ALGORITHM::SEQ;
 
 enum class ARCHITECTURE {
-    MLP, CNN
+    MLP, CNN, LENET
 };
 std::vector<std::string> ArchTypes = {
         "MLP",
-        "CNN"
+        "CNN",
+        "LENET"
 };
 ARCHITECTURE use_arch = ARCHITECTURE::MLP;
+
+std::string tauadaptstrat = "NONE";
+
+std::string use_dataset = "MNIST";
 
 template<typename T>
 std::ostream &operator<<(typename std::enable_if<std::is_enum<T>::value, std::ostream>::type &stream, const T &e) {
@@ -52,24 +60,26 @@ int main(int argc, char *argv[]) {
 
     struct option long_options[] = {
             // These options don't set a flag
-            {"help",                no_argument,       NULL, 'h'},
-            {"algo",                required_argument, NULL, 'a'},
-            {"arch",                required_argument, NULL, 'A'},
-            {"epochs",              required_argument, NULL, 'e'},
-            {"num-threads",         required_argument, NULL, 'n'},
-            {"print-vals",          required_argument, NULL, 'v'},
-            {NULL, 0,                                  NULL, 0}
+            {"help",                no_argument,       nullptr, 'h'},
+            {"algo",                required_argument, nullptr, 'a'},
+            {"arch",                required_argument, nullptr, 'A'},
+            {"epochs",              required_argument, nullptr, 'e'},
+            {"num-threads",         required_argument, nullptr, 'n'},
+            {"print-vals",          required_argument, nullptr, 'v'},
+            {nullptr, 0,                                  nullptr, 0}
     };
 
     if (argc == 1) {
-        printf("Use --help for help\n");
+        printf("Use -h or --help for help\n");
         exit(0);
     }
     int i, c;
 
+    unsigned long arch_id;
+
     while (1) {
         i = 0;
-        c = getopt_long(argc, argv, "a:b:e:n:r:l:m:B:R:C:A:L:U:", long_options, &i);
+        c = getopt_long(argc, argv, "a:b:e:n:r:l:m:B:R:C:A:L:U:t:D:", long_options, &i);
 
         if (c == -1) {
             //printf("Use -h or --help for help\n");
@@ -82,7 +92,7 @@ int main(int argc, char *argv[]) {
 
         unsigned long algo_id = AlgoTypes.size() - 1;
         std::string algo_name;
-        unsigned long arch_id = ArchTypes.size() - 1;
+        arch_id = ArchTypes.size() - 1;
         std::string arch_name;
 
         switch (c) {
@@ -90,15 +100,17 @@ int main(int argc, char *argv[]) {
                 /* Flag is automatically set */
                 break;
             case 'h':
-                printf("Shared-memory parallel SGD"
+                printf("Parallel SGD shared Memory Benchmarks"
                        "\n"
                        "\n"
                        "Usage:\n"
                        "  %s [options...]\n"
                        "\n"
                        "Options:\n"
-                       "  --help\n"
+                       "  -h, --help\n"
                        "        Print this message\n"
+                       "  -D, --data-set <int>\n"
+                       "        Data set {MNIST, FASHION-MNIST, CIFAR10}\n"
                        "  -b, --batch-size <int>\n"
                        "        Batch size\n"
                        "  -e, --epochs <int>\n"
@@ -110,7 +122,7 @@ int main(int argc, char *argv[]) {
                        "  -a, --algorithm <string>\n"
                        "        {SEQ, SYNC, ASYNC, HOG, LSH}\n"
                        "  -A, --architecture <string>\n"
-                       "        {MLP, CNN}\n"
+                       "        {MLP, CNN, LENET}\n"
                        "  -L, <int>\n"
                        "        Number of hidden layers\n"
                        "  -U, <int>\n"
@@ -121,6 +133,8 @@ int main(int argc, char *argv[]) {
                        "        CAS backoff threshold, max n.o. failed CAS per step\n"
                        "  -C, <bool>\n"
                        "        In LSH, check for concurrent updates in retry loop\n"
+                       "  -t, <bool>\n"
+                       "        Staleness-adaptive step size strategy\n"
                        "  -v, --print-vals <int>\n"
                        "        Print debug informations\n", argv[0]);
                 exit(0);
@@ -168,6 +182,12 @@ int main(int argc, char *argv[]) {
             case 'C':
                 check_concurrent_updates = atoi(optarg);
                 break;
+            case 't':
+                tauadaptstrat = optarg;
+                break;
+            case 'D':
+                use_dataset = optarg;
+                break;
             case 'L':
                 num_hidden_layers = atoi(optarg);
                 break;
@@ -186,13 +206,63 @@ int main(int argc, char *argv[]) {
 
 
     // data
-    MNIST dataset("./data/");
-    dataset.read();
-    long n_train = dataset.train_data.cols();
-    long dim_in = dataset.train_data.rows();
 
-    Matrix x = dataset.train_data;
-    Matrix y = dataset.train_labels;
+    Matrix x;
+    Matrix y;
+
+    int in_dim_x;
+    int in_dim_y;
+    int in_no_chs;
+
+    if (use_dataset == "CIFAR10") {
+
+        in_dim_x = 32;
+        in_dim_y = 32;
+        in_no_chs = 3;
+
+        auto DATASET = cifar::read_dataset<std::vector, std::vector, double, double>();
+
+        long n_train = DATASET.training_images.size(); // 50K
+        long dim_in = DATASET.training_images[0].size(); // 3072
+
+        typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> Matrix;
+        typedef Eigen::Matrix<double, Eigen::Dynamic, 1> Vector;
+
+        x = Matrix::Zero(dim_in, n_train);
+
+        for (int i = 0; i < n_train; i++)
+            x.col(i) = Vector::Map(&DATASET.training_images[i][0], DATASET.training_images[i].size());
+
+        x /= 255; // normalize
+
+        y = Matrix::Zero(10, n_train);
+
+        int T;
+        for (int i = 0; i < n_train; i++){
+            T = DATASET.training_labels[i];
+            if (T < 10 && T >= 0)
+                y(T, i) = 1;//Vector::Map(&DATASET.training_labels[i][0], DATASET.training_labels[i].size());
+            else
+                std::cout << "Label value error: " << T << std::endl;
+        }
+    } else {
+
+        in_dim_x = 28;
+        in_dim_y = 28;
+        in_no_chs = 1;
+
+        std::string data_dir;
+        if (use_dataset == "MNIST") {
+            data_dir = "./data/mnist/";
+        } else if (use_dataset == "FASHION-MNIST") {
+            data_dir = "./data/fashion-mnist/";
+        }
+        MNIST dataset(data_dir);
+        dataset.read();
+
+        x = dataset.train_data;
+        y = dataset.train_labels;
+    }
 
     // Construct a network object
 
@@ -201,19 +271,48 @@ int main(int argc, char *argv[]) {
     NetworkTopology network(init_param);
 
     if (use_arch == ARCHITECTURE::MLP) {
-        network.add_layer(new FullyConnected<ReLU>(28 * 28, num_hidden_units));
-        for (int i = 0; i < num_hidden_layers; i++) {
+        network.add_layer(new FullyConnected<ReLU>(in_dim_x * in_dim_y * in_no_chs, num_hidden_units));
+        for (int i = 0; i < num_hidden_layers - 1; i++) {
             network.add_layer(new FullyConnected<ReLU>(num_hidden_units, num_hidden_units));
         }
         network.add_layer(new FullyConnected<Softmax>(num_hidden_units, 10));
     } else if (use_arch == ARCHITECTURE::CNN) {
-        // hard-coded CNN architecture
+
         network.add_layer(new Convolutional<ReLU>(28, 28, 1, 4, 3, 3));
         network.add_layer(new MaxPooling<ReLU>(26, 26, 4, 2, 2));
+
         network.add_layer(new Convolutional<ReLU>(13, 13, 4, 8, 3, 3));
         network.add_layer(new MaxPooling<ReLU>(11, 11, 8, 2, 2));
+
         network.add_layer(new FullyConnected<ReLU>(5 * 5 * 8, 128));
         network.add_layer(new FullyConnected<Softmax>(128, 10));
+
+    } else if (use_arch == ARCHITECTURE::LENET) {
+
+        if (use_dataset == "CIFAR10") {
+
+            network.add_layer(new Convolutional<ReLU>(32, 32, 3, 6, 5, 5));
+            network.add_layer(new MaxPooling<ReLU>(28, 28, 6, 2, 2));
+
+            network.add_layer(new Convolutional<ReLU>(14, 14, 6, 16, 5, 5));
+            network.add_layer(new MaxPooling<ReLU>(10, 10, 16, 2, 2));
+
+            network.add_layer(new FullyConnected<ReLU>(5 * 5 * 16, 120));
+
+        } else if (use_dataset == "MNIST" || use_dataset == "FASHION-MNIST") {
+
+            network.add_layer(new Convolutional<ReLU>(28, 28, 1, 6, 5, 5));
+            network.add_layer(new MaxPooling<ReLU>(24, 24, 6, 2, 2));
+
+            network.add_layer(new Convolutional<ReLU>(12, 12, 6, 16, 5, 5));
+            network.add_layer(new MaxPooling<ReLU>(8, 8, 16, 2, 2));
+
+            network.add_layer(new FullyConnected<ReLU>(4 * 4 * 16, 120));
+
+        }
+
+        network.add_layer(new FullyConnected<Softmax>(120, 10));
+
     }
 
     // Set output layer
@@ -237,11 +336,13 @@ int main(int argc, char *argv[]) {
         thread_local_opts[i] = opt->clone();
     }
 
-    NetworkExecutor<Matrix, Matrix> executor(&network, opt, thread_local_opts, x, y);
+    int algorithm_id = static_cast<int>(run_algo);
+    int architecture_id = static_cast<int>(use_arch);
+    NetworkExecutor<Matrix, Matrix> executor(&network, opt, thread_local_opts, x, y, tauadaptstrat, num_threads, learning_rate, algorithm_id, architecture_id);
 
 
     struct timeval start, end;
-    gettimeofday(&start, NULL);
+    gettimeofday(&start, nullptr);
 
     switch (run_algo) {
         case ALGORITHM::SEQ:
@@ -250,24 +351,24 @@ int main(int argc, char *argv[]) {
             executor.run_training(batch_size, num_epochs, rounds_per_epoch, rand_seed);
             break;
         case ALGORITHM::SYNC:
-            executor.run_parallel_sync(batch_size, num_epochs, rounds_per_epoch, num_threads, rand_seed);
+            executor.run_parallel_sync(batch_size, num_epochs, rounds_per_epoch, rand_seed);
             break;
         case ALGORITHM::ASYNC:
-            executor.run_parallel_async(batch_size, num_epochs, rounds_per_epoch, num_threads, rand_seed, true);
+            executor.run_parallel_async(batch_size, num_epochs, rounds_per_epoch, rand_seed, true);
             break;
         case ALGORITHM::HOG:
-            executor.run_parallel_async(batch_size, num_epochs, rounds_per_epoch, num_threads, rand_seed);
+            executor.run_parallel_async(batch_size, num_epochs, rounds_per_epoch, rand_seed);
             break;
         case ALGORITHM::LSH:
-            executor.run_parallel_leashed(batch_size, num_epochs, rounds_per_epoch, cas_backoff, num_threads, check_concurrent_updates, rand_seed);
+            executor.run_parallel_leashed(batch_size, num_epochs, rounds_per_epoch, cas_backoff, check_concurrent_updates, rand_seed);
             break;
         default:
-            printf("Use --help for help\n");
+            printf("Use -h or --help for help\n");
             exit(1);
             break;
     }
 
-    gettimeofday(&end, NULL);
+    gettimeofday(&end, nullptr);
     time_t duration;
     duration = end.tv_sec - start.tv_sec;
 

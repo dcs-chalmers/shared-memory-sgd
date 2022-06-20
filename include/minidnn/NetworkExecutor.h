@@ -16,6 +16,7 @@ namespace MiniDNN {
                 XType;
         typedef Eigen::Matrix<typename PlainObjectY::Scalar, PlainObjectY::RowsAtCompileTime, PlainObjectY::ColsAtCompileTime>
                 YType;
+
     private:
         Optimizer *opt;
         std::vector<Optimizer *> thread_local_opts;
@@ -32,7 +33,25 @@ namespace MiniDNN {
         int tau_threshold = 200;
         std::vector<long> tau_dist;
 
+        // adaptation amplitude when using the TAIL step size function
+        float adaptation_amplitude = 1.0;
+
+        // parameters for collecting a representative tau distribution in the beginning
+        int tau_sample_start = 10; // n.o. iterations per thread before tau collection starts
+        int tau_sample_stop = 15; // n.o. iterations per thread when tau collection ends
+        std::vector<float> tau_dist_sample; // representative tau distribution, used to compute tail_dist
+        std::vector<float> tail_dist; // tail distribution (CDF)
+        bool tail_dist_finished = false; // indicates wether the tail distribution has been computed yet
+
         std::vector<long> num_tries_dist;
+
+        std::string tauadaptstrat;
+        double base_stepsize;
+        int num_threads;
+        int algorithm_id;
+        int arch_id;  // 0: MLP, 1: CNN
+
+        int max_staleness = 199;
 
     public:
 
@@ -42,15 +61,19 @@ namespace MiniDNN {
         /// \param x          The predictors. Each column is an observation.
         /// \param y          The response variable. Each column is an observation.
         NetworkExecutor(NetworkTopology *_net, Optimizer *_opt, std::vector<Optimizer *> _thread_local_opts, const Eigen::MatrixBase<DerivedX> &_x,
-                        const Eigen::MatrixBase<DerivedY> &_y)
+                        const Eigen::MatrixBase<DerivedY> &_y, std::string _tauadaptstrat, int _num_threads, double _base_stepsize, int _algorithm_id, int _arch_id)
                 : m_default_rng(1),
                   m_rng(m_default_rng),
-                  thread_local_opts(_thread_local_opts),
+                  thread_local_opts(std::move(_thread_local_opts)),
                   opt(_opt),
                   x(_x),
                   y(_y),
+                  tauadaptstrat(std::move(_tauadaptstrat)),
+                  num_threads(_num_threads),
+                  base_stepsize(_base_stepsize),
+                  algorithm_id(_algorithm_id),
+                  arch_id(_arch_id),
                   net(_net) {
-
         }
 
         Scalar get_loss() {
@@ -71,6 +94,38 @@ namespace MiniDNN {
 
         std::vector<long> &get_num_tries_dist() {
             return num_tries_dist;
+        }
+
+        void compute_tail_dist() {
+            long cum_tau = 0;
+            int num_steps_used = num_threads * (tau_sample_stop - tau_sample_start);
+            for (int j = 0; j < tau_threshold; ++j) {
+                tail_dist.push_back( ((float)cum_tau / (float)num_steps_used));
+                cum_tau += tau_dist_sample[j];
+            }
+            tail_dist_finished = true;
+        }
+
+        float get_stepsize_scaling_factor(int staleness, const std::string& strategy) {
+            if (staleness >> max_staleness)
+                staleness = max_staleness;
+            if (strategy == "NONE") {
+                return 1.0;
+            } else if (strategy == "INVERSE") {
+                return 1.0 / ((double)staleness+1);
+            } else if (strategy == "TAIL") {  // TAIL
+                if (tail_dist_finished) {
+                    float scaling_factor = 1 + adaptation_amplitude * (1 - 2*tail_dist[staleness]);
+                    return scaling_factor;
+                } else {
+                    return 1.0;
+                }
+            } else if (strategy == "FLEET") {
+                int tau_thresh = num_threads + 1;
+                float beta = 2.0 / tau_thresh * log(1 + tau_thresh/2);
+                float scaling_factor = exp( - beta * staleness );
+                return scaling_factor;
+            }
         }
 
         /// \param epoch      Number of epochs of training.
@@ -129,7 +184,7 @@ namespace MiniDNN {
             }
         }
 
-        void run_parallel_sync(int batch_size, int epoch, int rounds_per_epoch, int num_threads, int seed = -1) {
+        void run_parallel_sync(int batch_size, int epoch, int rounds_per_epoch, int seed = -1) {
 
             opt->reset();
 
@@ -236,7 +291,7 @@ namespace MiniDNN {
             loss /= num_threads;
         }
 
-        void run_parallel_async(int batch_size, int num_epochs, int rounds_per_epoch, int num_threads, int seed = -1, bool use_lock = false) {
+        void run_parallel_async(int batch_size, int num_epochs, int rounds_per_epoch, int seed = -1, bool use_lock = false) {
 
             opt->reset();
 
@@ -281,6 +336,10 @@ namespace MiniDNN {
                 }
             }
 
+            for (int j = 0; j < tau_threshold; ++j) {
+                tau_dist_sample.push_back(0);
+            }
+
             std::atomic<int> next_batch(0);
             std::atomic<long> step(0);
 
@@ -288,6 +347,11 @@ namespace MiniDNN {
                 while (true) {
                     long local_step = step.fetch_add(1);
                     //std::cout << "thread " << id << " step " << local_step << std::endl;
+
+                    if (tauadaptstrat != "NONE" && local_step == tau_sample_stop * num_threads) {
+                        // this thread computes the tail distribution
+                        compute_tail_dist();
+                    }
 
                     // reserve next unique batch
                     int batch_index = next_batch.fetch_add(1) % nbatch;
@@ -305,7 +369,7 @@ namespace MiniDNN {
                         mtx.lock();
 
                     // copy global to local parameters
-                    ParameterContainer *local_param = new ParameterContainer(*global_param);
+                    auto *local_param = new ParameterContainer(*global_param);
 
                     if (use_lock)
                         mtx.unlock();
@@ -320,13 +384,13 @@ namespace MiniDNN {
                     thread_local_networks[id]->backprop(x_batches[batch_index], y_batches[batch_index]);
                     const Scalar loss = thread_local_networks[id]->get_loss();
 
-                    //std::cerr << "[Epoch " << epoch << "] Loss = " << loss << std::endl;
+                    //std::cerr << id << ": [Epoch " << epoch << "] Loss = " << loss << std::endl;
 
                     // add loss to thread local epoch loss sum
                     local_losses_per_epoch[id][epoch] += loss;
 
                     thread_local_networks[id]->set_pointer(global_param);
-
+                    
                     delete local_param;
 
                     if (use_lock)
@@ -334,16 +398,22 @@ namespace MiniDNN {
 
                     long t1 = global_param->timestamp;
 
+                    int tau = t1 - t0;
+
+                    thread_local_opts[id]->step_scale_factor = get_stepsize_scaling_factor(tau, tauadaptstrat);
+
                     //thread_local_networks[id]->update(opt); // AlignedMapVec update
                     thread_local_networks[id]->update_cw(thread_local_opts[id]); // component-wise update
 
                     if (use_lock)
                         mtx.unlock();
 
-                    int tau = t1 - t0;
-
-                    if (tau < tau_threshold)
+                    if (tau < tau_threshold) {
                         local_tau_dist[id][tau] += 1;
+                        if (tauadaptstrat != "NONE" && local_step > tau_sample_start * num_threads && local_step < tau_sample_stop * num_threads) {
+                            tau_dist_sample[tau] += 1;
+                        }
+                    }
 
                     if (epoch_step == rounds_per_epoch - 1) {
                         struct timeval now;
@@ -395,7 +465,7 @@ namespace MiniDNN {
             }
         }
 
-        void run_parallel_leashed(int batch_size, int num_epochs, int rounds_per_epoch, int CAS_backoff, int num_threads, bool check_concurrent_updates, int seed = -1) {
+        void run_parallel_leashed(int batch_size, int num_epochs, int rounds_per_epoch, int CAS_backoff, bool check_concurrent_updates, int seed = -1) {
 
             opt->reset();
 
@@ -443,6 +513,9 @@ namespace MiniDNN {
                 for (int j = 0; j < CAS_backoff; ++j) {
                     local_num_tries_dist[i].push_back(0);
                 }
+            }
+            for (int j = 0; j < tau_threshold; ++j) {
+                tau_dist_sample.push_back(0);
             }
 
             std::atomic<int> failed_cas_counter(0);
@@ -577,6 +650,9 @@ namespace MiniDNN {
                         struct timeval update_start, update_end;
                         gettimeofday(&update_start, NULL);
 
+                        float scale_factor = get_stepsize_scaling_factor(tau, tauadaptstrat);
+                        thread_local_opts[id]->step_scale_factor = scale_factor;
+
                         // apply gradient locally
                         //thread_local_networks[id]->update(opt); // AlignedMapVec update
                         thread_local_networks[id]->update_cw(thread_local_opts[id]); // component-wise update
@@ -616,6 +692,11 @@ namespace MiniDNN {
                                 local_step = step.fetch_add(1);
                                 long epoch_step = local_step % rounds_per_epoch;
 
+                                if (tauadaptstrat != "NONE" && local_step == tau_sample_stop * num_threads) {
+                                    // this thread computes the tail distribution
+                                    compute_tail_dist();
+                                }
+
                                 if (epoch_step == rounds_per_epoch - 1) {
                                     struct timeval now;
                                     gettimeofday(&now, NULL);
@@ -627,8 +708,12 @@ namespace MiniDNN {
                                     time_per_epoch.push_back(now.tv_sec);
                                 }
 
-                                if (tau < tau_threshold)
+                                if (tau < tau_threshold) {
                                     local_tau_dist[id][tau] += 1;
+                                    if (tauadaptstrat != "NONE" && local_step > tau_sample_start * num_threads && local_step < tau_sample_stop * num_threads) {
+                                        tau_dist_sample[tau] += 1;
+                                    }
+                                }
 
                                 if (num_tries < CAS_backoff) {
                                     local_num_tries_dist[id][num_tries] += 1;

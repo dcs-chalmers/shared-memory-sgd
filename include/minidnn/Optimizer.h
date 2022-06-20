@@ -24,6 +24,8 @@ namespace MiniDNN {
 
     public:
 
+        float step_scale_factor = 1.0;
+
         Optimizer() {}
 
         virtual Optimizer *clone() = 0;
