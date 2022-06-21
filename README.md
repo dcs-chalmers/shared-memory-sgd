@@ -62,9 +62,10 @@ The following shared-memory parallel SGD algorithms are implemented:
 * Hogwild! - Lock-free asynchronous SGD without consistency
 * Synchronous parallel SGD
 
-The following asynchrony-aware options are implemented:
+The following asynchrony-aware step size options are implemented:
 * The TAIL-TAU Staleness-adaptive step size
 * The FLeet staleness-adaptive step size <a href="https://dl.acm.org/doi/10.1145/3423211.3425685">[Damaskinos, G, et al. Middleware '20]</a>.
+* Standard 1/staleness inverse step size scaling/dampening
 
 
 
@@ -109,8 +110,8 @@ Flag | Meaning | Values
 `r` | *n.o. rounds per epochs* | Integer
 `b` | *mini-batch size* | Integer
 `l` | *Step size* | Float
-`D` | *Dataset* | String
-`t` | *Staleness-adaptive step size strategy* | String
+`D` | *Dataset* | ['MNIST', 'FASHION-MNIST', 'CIFAR10']
+`t` | *Staleness-adaptive step size strategy* | ['NONE', 'INVERSE', 'TAIL', 'FLEET']
 
 to see all options:
  ```sh
@@ -165,6 +166,30 @@ Contributions are what make the open source community such an amazing place to b
 3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
 4. Push to the Branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
+
+
+
+## Reference the repository and the papers
+
+ ```
+@misc{backstrom2021framework,
+  author = {Bäckström, Karl},
+  title = {shared-memory-sgd},
+  year = {2021},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/dcs-chalmers/shared-memory-sgd}},
+  commit = {XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX}
+}
+@inproceedings{backstrom2021consistent,
+  title={Consistent lock-free parallel stochastic gradient descent for fast and stable convergence},
+  author={B{\"a}ckstr{\"o}m, Karl and Walulya, Ivan and Papatriantafilou, Marina and Tsigas, Philippas},
+  booktitle={2021 IEEE International Parallel and Distributed Processing Symposium (IPDPS)},
+  pages={423--432},
+  year={2021},
+  organization={IEEE}
+}
+ ```
 
 
 
